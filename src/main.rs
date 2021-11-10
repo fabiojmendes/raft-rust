@@ -1,33 +1,31 @@
 use std::{
-    io,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    sync::{
-        mpsc::{self, Sender},
-        Arc, Mutex,
-    },
+    io::{self, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
+use bus::Bus;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 
 const CLUSTER_SIZE: i32 = 3;
-const PORT: u16 = 5001;
-const MULTICAST_IP: [u8; 4] = [224, 0, 0, 123];
 
-#[derive(Debug, Serialize, Deserialize)]
-enum MessageType {
-    AppendRequest,
-    VoteRequest,
-    VoteResponse,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Message {
+    id: u16,
+    term: u64,
+    mtype: MessageType,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Message {
-    addr: IpAddr,
-    term: u32,
-    mtype: MessageType,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+enum MessageType {
+    AppendReq,
+    AppendRes,
+    VoteReq,
+    VoteRes,
+    ACK,
 }
 
 #[derive(Debug, PartialEq)]
@@ -37,63 +35,61 @@ enum Status {
     Leader,
 }
 
-#[derive(Debug)]
-struct Node {
-    addr: IpAddr,
-    status: Status,
-    term: u32,
+struct State {
+    id: u16,
+    term: u64,
     votes: i32,
-    vote_for: u32,
+    voted_on: u64,
     last_update: Instant,
-    rpc_tx: Sender<Message>,
+    status: Status,
+    bus: Bus<Message>,
 }
 
-impl Node {
-    fn new(addr: IpAddr, rpc_tx: Sender<Message>) -> Self {
-        Node {
-            addr,
-            status: Status::Follower,
+impl State {
+    fn new(id: u16, bus: Bus<Message>) -> Self {
+        State {
+            id,
             term: 0,
             votes: 0,
-            vote_for: 0,
+            voted_on: 0,
             last_update: Instant::now(),
-            rpc_tx,
+            status: Status::Follower,
+            bus,
         }
     }
 
-    fn request_votes(&self) {
-        println!("[{}] Request votes", self.addr);
-        self.rpc_tx
-            .send(Message {
-                addr: self.addr,
-                term: self.term,
-                mtype: MessageType::VoteRequest,
-            })
-            .unwrap();
+    fn vote(&mut self, msg: Message) -> Message {
+        let mtype = if msg.term > self.term && self.voted_on < msg.term {
+            println!("[{}] Voting on {:?}", self.id, msg);
+            self.term = msg.term;
+            self.voted_on = msg.term;
+            self.last_update = Instant::now();
+            MessageType::VoteRes
+        } else {
+            MessageType::ACK
+        };
+        Message {
+            id: self.id,
+            term: self.term,
+            mtype,
+        }
     }
 
-    fn vote(&mut self, term: u32, peer: IpAddr) {
-        self.term = term;
-        self.vote_for = term;
-        self.last_update = Instant::now();
-        self.rpc_tx
-            .send(Message {
-                addr: peer,
-                term: self.term,
-                mtype: MessageType::VoteResponse,
-            })
-            .unwrap();
+    fn req_votes(&mut self) {
+        self.bus.broadcast(Message {
+            id: self.id,
+            term: self.term,
+            mtype: MessageType::VoteReq,
+        });
     }
 
-    fn heartbeat(&mut self) {
-        self.last_update = Instant::now();
-        self.rpc_tx
-            .send(Message {
-                addr: self.addr,
-                term: self.term,
-                mtype: MessageType::AppendRequest,
-            })
-            .unwrap();
+    fn receive_vote(&mut self) {
+        println!("[{}] Vote received", self.id);
+        self.votes += 1;
+        if self.status == Status::Candidate && self.votes >= CLUSTER_SIZE / 2 + 1 {
+            println!("[{}] Becoming Leader", self.id);
+            self.status = Status::Leader;
+        }
     }
 
     fn tick(&mut self) {
@@ -101,107 +97,154 @@ impl Node {
             Status::Follower => {
                 let mut rng = thread_rng();
                 let delay = Duration::from_millis(3000 + rng.gen_range(0..2000));
-                if self.vote_for <= self.term && self.last_update.elapsed() >= delay {
-                    println!("[{}] Becoming candidate", self.addr);
+                if self.voted_on <= self.term && self.last_update.elapsed() >= delay {
+                    println!("[{}] Becoming candidate", self.id);
                     self.status = Status::Candidate;
                     self.term += 1;
                     self.votes = 1;
-                    self.vote_for = self.term;
+                    self.voted_on = self.term;
                     self.last_update = Instant::now();
-                    self.request_votes();
+                    self.req_votes();
                 }
             }
             Status::Candidate => {
                 if self.last_update.elapsed() >= Duration::from_millis(3000) {
-                    println!("[{}] Election failed... {:?}", self.addr, self);
+                    println!("[{}] Election failed... term:{}", self.id, self.term);
                     self.status = Status::Follower;
                     self.last_update = Instant::now();
                 }
             }
             Status::Leader => {
-                self.heartbeat();
+                self.last_update = Instant::now();
+                self.bus.broadcast(Message {
+                    id: self.id,
+                    term: self.term,
+                    mtype: MessageType::AppendReq,
+                });
             }
         }
     }
+    fn append(&mut self, msg: Message) -> Message {
+        println!("[{}] Append from {:?}", self.id, msg);
+        if msg.term >= self.term {
+            self.status = Status::Follower;
+            self.term = msg.term;
+            self.last_update = Instant::now();
+        }
+        Message {
+            id: self.id,
+            term: self.term,
+            mtype: MessageType::AppendRes,
+        }
+    }
 
-    fn handle(&mut self, msg: Message, peer: IpAddr) {
-        match msg.mtype {
-            MessageType::AppendRequest => {
-                println!(
-                    "[{}] Append Req from {}, term {} ",
-                    self.addr, peer, msg.term
-                );
-                if msg.term >= self.term {
-                    self.status = Status::Follower;
-                    self.term = msg.term;
-                    self.last_update = Instant::now();
-                }
-            }
-            MessageType::VoteRequest => {
-                println!("[{}] Vote Req from {}, term {}", self.addr, peer, msg.term);
-                if msg.term > self.term && self.vote_for < msg.term {
-                    self.vote(msg.term, peer);
-                }
-            }
-            MessageType::VoteResponse { .. } => {
-                println!("[{}] Vote Res {:?} from {}", self.addr, msg, peer);
-                self.votes += 1;
-                if self.status == Status::Candidate && self.votes >= CLUSTER_SIZE / 2 + 1 {
-                    println!("[{}] Becoming Leader", self.addr);
-                    self.status = Status::Leader;
-                }
-            }
+    fn commit(&mut self, msg: Message) {
+        println!("[{}] Commit TBD {:?}", self.id, msg);
+    }
+
+    fn ack(&self) -> Message {
+        Message {
+            id: self.id,
+            term: self.term,
+            mtype: MessageType::ACK,
         }
     }
 }
 
-fn start_timer(node_mutex: Arc<Mutex<Node>>) {
+fn handle_conn(mut stream: TcpStream, state_mtx: Arc<Mutex<State>>) {
+    let mut buf = [0; 1024];
+    loop {
+        let size = stream.read(&mut buf).unwrap();
+        if size == 0 {
+            println!("Stream is closed: {:?}", stream);
+            break;
+        }
+        let req: Message = bincode::deserialize(&buf[..size]).unwrap();
+        let res = {
+            let mut state = state_mtx.lock().unwrap();
+            match req.mtype {
+                MessageType::AppendReq => state.append(req),
+                MessageType::VoteReq => state.vote(req),
+                _ => state.ack(),
+            }
+        };
+        let payload = bincode::serialize(&res).unwrap();
+        stream.write_all(&payload).unwrap();
+    }
+}
+
+fn start_timer(state_mtx: Arc<Mutex<State>>) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(1000));
-        let mut node = node_mutex.lock().unwrap();
-        node.tick();
+        let mut state = state_mtx.lock().unwrap();
+        state.tick();
+    });
+}
+
+fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
+    thread::spawn(move || {
+        println!("Connecting to {}", peer);
+        loop {
+            match TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], peer))) {
+                Ok(mut stream) => {
+                    println!("Connected {:?}", stream);
+                    let mut bus = {
+                        let mut state = state_mtx.lock().unwrap();
+                        state.bus.add_rx()
+                    };
+                    let mut buf = [0; 1024];
+                    loop {
+                        let msg = bus.recv().unwrap();
+                        let payload = bincode::serialize(&msg).unwrap();
+                        stream.write_all(&payload).unwrap();
+                        let size = stream.read(&mut buf).unwrap();
+                        if size == 0 {
+                            println!("Connect stream was closed: {:?}", stream);
+                            break;
+                        }
+                        let res: Message = bincode::deserialize(&buf[..size]).unwrap();
+                        let mut state = state_mtx.lock().unwrap();
+                        match res.mtype {
+                            MessageType::AppendRes => state.commit(res),
+                            MessageType::VoteRes => state.receive_vote(),
+                            _ => println!("NOP {:?}", res),
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error connecting {}", e);
+                    thread::sleep(Duration::from_millis(5000));
+                }
+            }
+        }
     });
 }
 
 fn main() -> io::Result<()> {
-    let multicast_addr: SocketAddr = SocketAddr::from((MULTICAST_IP, PORT));
-    let args: Vec<_> = std::env::args().collect();
-    let self_addr = args[1].parse().unwrap();
-    let (rpc_tx, rpc_rx) = mpsc::channel();
-    let node_mutex = Arc::new(Mutex::new(Node::new(self_addr, rpc_tx.clone())));
-    start_timer(node_mutex.clone());
+    let ports = [8080, 8081, 8082];
+    let addrs = ports.map(|p| SocketAddr::from(([127, 0, 0, 1], p)));
+    let listener = TcpListener::bind(&addrs[..])?;
+    let local_port = listener.local_addr()?.port();
+    let peers: Vec<_> = ports.into_iter().filter(|&p| p != local_port).collect();
+    println!("[{}] Listening for {:?}", local_port, peers);
 
-    thread::spawn(move || {
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        loop {
-            if let Ok(msg) = rpc_rx.recv() {
-                let dst = match msg.mtype {
-                    MessageType::VoteResponse => SocketAddr::from((msg.addr, PORT)),
-                    _ => multicast_addr
-                };
-                println!("[{}] Sending {:?} to {}", &self_addr, msg, &dst);
-                let payload = bincode::serialize(&msg).unwrap();
-                socket.send_to(&payload, &dst).unwrap();
-            }
-        }
-    });
+    let bus = Bus::new(16);
+    let state_mtx = Arc::new(Mutex::new(State::new(local_port, bus)));
 
-    let listen_addr = SocketAddr::from(([0, 0, 0, 0], PORT));
-    let socket = UdpSocket::bind(listen_addr)?;
-    let interface = Ipv4Addr::new(0, 0, 0, 0);
-    let mdns_addr = Ipv4Addr::new(224, 0, 0, 123);
-    socket.join_multicast_v4(&mdns_addr, &interface)?;
-    println!("Listening on {}", socket.local_addr()?);
-
-    let mut buf = vec![0u8; 2048];
-    loop {
-        let (recv, peer) = socket.recv_from(&mut buf).unwrap();
-        let mut node = node_mutex.lock().unwrap();
-        if peer.ip() == node.addr {
-            continue;
-        }
-
-        let msg: Message = bincode::deserialize(&buf[..recv]).unwrap();
-        node.handle(msg, peer.ip());
+    for p in peers {
+        connect(p, state_mtx.clone());
     }
+
+    start_timer(state_mtx.clone());
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let state_mtx = state_mtx.clone();
+                thread::spawn(move || handle_conn(stream, state_mtx));
+            }
+            Err(e) => println!("[{}] Error: {}", local_port, e),
+        }
+    }
+    Ok(())
 }
