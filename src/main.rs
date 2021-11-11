@@ -11,6 +11,11 @@ use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 
 const CLUSTER_SIZE: i32 = 3;
+const MAJORITY: i32 = CLUSTER_SIZE / 2 + 1;
+const ELECTION_DELAY: u64 = 3000;
+const ELECTION_RND: u64 = 2000;
+const TICK_DELAY: u64 = 1000;
+const RECONNECT_DELAY: u64 = 5000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
@@ -21,8 +26,8 @@ struct Message {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 enum MessageType {
-    AppendReq,
-    AppendRes,
+    AppendReq { msg_id: u64 },
+    AppendRes { msg_id: u64 },
     VoteReq,
     VoteRes,
     ACK,
@@ -40,6 +45,7 @@ struct State {
     term: u64,
     votes: i32,
     voted_on: u64,
+    msg_id: u64,
     last_update: Instant,
     status: Status,
     bus: Bus<Message>,
@@ -52,6 +58,7 @@ impl State {
             term: 0,
             votes: 0,
             voted_on: 0,
+            msg_id: 0,
             last_update: Instant::now(),
             status: Status::Follower,
             bus,
@@ -86,7 +93,7 @@ impl State {
     fn receive_vote(&mut self) {
         println!("[{}] Vote received", self.id);
         self.votes += 1;
-        if self.status == Status::Candidate && self.votes >= CLUSTER_SIZE / 2 + 1 {
+        if self.status == Status::Candidate && self.votes >= MAJORITY {
             println!("[{}] Becoming Leader", self.id);
             self.status = Status::Leader;
         }
@@ -96,7 +103,7 @@ impl State {
         match self.status {
             Status::Follower => {
                 let mut rng = thread_rng();
-                let delay = Duration::from_millis(3000 + rng.gen_range(0..2000));
+                let delay = Duration::from_millis(ELECTION_DELAY + rng.gen_range(0..ELECTION_RND));
                 if self.voted_on <= self.term && self.last_update.elapsed() >= delay {
                     println!("[{}] Becoming candidate", self.id);
                     self.status = Status::Candidate;
@@ -108,7 +115,7 @@ impl State {
                 }
             }
             Status::Candidate => {
-                if self.last_update.elapsed() >= Duration::from_millis(3000) {
+                if self.last_update.elapsed() >= Duration::from_millis(ELECTION_DELAY) {
                     println!("[{}] Election failed... term:{}", self.id, self.term);
                     self.status = Status::Follower;
                     self.last_update = Instant::now();
@@ -116,30 +123,43 @@ impl State {
             }
             Status::Leader => {
                 self.last_update = Instant::now();
+                self.msg_id += 1;
+
                 self.bus.broadcast(Message {
                     id: self.id,
                     term: self.term,
-                    mtype: MessageType::AppendReq,
+                    mtype: MessageType::AppendReq {
+                        msg_id: self.msg_id,
+                    },
                 });
             }
         }
     }
     fn append(&mut self, msg: Message) -> Message {
-        println!("[{}] Append from {:?}", self.id, msg);
-        if msg.term >= self.term {
-            self.status = Status::Follower;
-            self.term = msg.term;
-            self.last_update = Instant::now();
-        }
+        let mtype = if let MessageType::AppendReq { msg_id } = msg.mtype {
+            println!("[{}] Append from {:?}", self.id, msg);
+            if msg.term >= self.term {
+                self.status = Status::Follower;
+                self.term = msg.term;
+                self.msg_id = msg_id;
+                self.last_update = Instant::now();
+            }
+            MessageType::AppendRes { msg_id }
+        } else {
+            MessageType::ACK
+        };
+
         Message {
             id: self.id,
             term: self.term,
-            mtype: MessageType::AppendRes,
+            mtype,
         }
     }
 
     fn commit(&mut self, msg: Message) {
-        println!("[{}] Commit TBD {:?}", self.id, msg);
+        if let MessageType::AppendRes { .. } = msg.mtype {
+            println!("[{}] Commit {:?}", self.id, msg);
+        }
     }
 
     fn ack(&self) -> Message {
@@ -163,7 +183,7 @@ fn handle_conn(mut stream: TcpStream, state_mtx: Arc<Mutex<State>>) {
         let res = {
             let mut state = state_mtx.lock().unwrap();
             match req.mtype {
-                MessageType::AppendReq => state.append(req),
+                MessageType::AppendReq { .. } => state.append(req),
                 MessageType::VoteReq => state.vote(req),
                 _ => state.ack(),
             }
@@ -175,7 +195,7 @@ fn handle_conn(mut stream: TcpStream, state_mtx: Arc<Mutex<State>>) {
 
 fn start_timer(state_mtx: Arc<Mutex<State>>) {
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(TICK_DELAY));
         let mut state = state_mtx.lock().unwrap();
         state.tick();
     });
@@ -205,15 +225,15 @@ fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
                         let res: Message = bincode::deserialize(&buf[..size]).unwrap();
                         let mut state = state_mtx.lock().unwrap();
                         match res.mtype {
-                            MessageType::AppendRes => state.commit(res),
+                            MessageType::AppendRes { .. } => state.commit(res),
                             MessageType::VoteRes => state.receive_vote(),
-                            _ => println!("NOP {:?}", res),
+                            _ => println!("NOP: {:?}", res),
                         }
                     }
                 }
                 Err(e) => {
-                    println!("Error connecting {}", e);
-                    thread::sleep(Duration::from_millis(5000));
+                    println!("Error connecting: {}", e);
+                    thread::sleep(Duration::from_millis(RECONNECT_DELAY));
                 }
             }
         }
@@ -246,5 +266,6 @@ fn main() -> io::Result<()> {
             Err(e) => println!("[{}] Error: {}", local_port, e),
         }
     }
+
     Ok(())
 }
