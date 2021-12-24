@@ -1,2 +1,2 @@
 # raft-rust
-Incomplete implementation of the raft algorithm in rust
+Incomplete implementation of the raft algorithm in rust.
