@@ -30,7 +30,7 @@ enum MessageType {
     AppendRes { msg_id: u64 },
     VoteReq,
     VoteRes,
-    ACK,
+    Ack,
 }
 
 #[derive(Debug, PartialEq)]
@@ -73,7 +73,7 @@ impl State {
             self.last_update = Instant::now();
             MessageType::VoteRes
         } else {
-            MessageType::ACK
+            MessageType::Ack
         };
         Message {
             id: self.id,
@@ -146,7 +146,7 @@ impl State {
             }
             MessageType::AppendRes { msg_id }
         } else {
-            MessageType::ACK
+            MessageType::Ack
         };
 
         Message {
@@ -166,7 +166,7 @@ impl State {
         Message {
             id: self.id,
             term: self.term,
-            mtype: MessageType::ACK,
+            mtype: MessageType::Ack,
         }
     }
 }
