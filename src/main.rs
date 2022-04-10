@@ -17,14 +17,14 @@ const ELECTION_RND: u64 = 2000;
 const TICK_DELAY: u64 = 1000;
 const RECONNECT_DELAY: u64 = 5000;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Message {
     id: u16,
     term: u64,
     mtype: MessageType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 enum MessageType {
     AppendReq { msg_id: u64 },
     AppendRes { msg_id: u64 },
@@ -48,11 +48,11 @@ struct State {
     msg_id: u64,
     last_update: Instant,
     status: Status,
-    bus: Bus<Message>,
+    bus: Bus<Arc<Message>>,
 }
 
 impl State {
-    fn new(id: u16, bus: Bus<Message>) -> Self {
+    fn new(id: u16, bus: Bus<Arc<Message>>) -> Self {
         State {
             id,
             term: 0,
@@ -83,11 +83,11 @@ impl State {
     }
 
     fn req_votes(&mut self) {
-        self.bus.broadcast(Message {
+        self.bus.broadcast(Arc::new(Message {
             id: self.id,
             term: self.term,
             mtype: MessageType::VoteReq,
-        });
+        }));
     }
 
     fn receive_vote(&mut self) {
@@ -125,13 +125,13 @@ impl State {
                 self.last_update = Instant::now();
                 self.msg_id += 1;
 
-                self.bus.broadcast(Message {
+                self.bus.broadcast(Arc::new(Message {
                     id: self.id,
                     term: self.term,
                     mtype: MessageType::AppendReq {
                         msg_id: self.msg_id,
                     },
-                });
+                }));
             }
         }
     }
@@ -215,7 +215,7 @@ fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
                     let mut buf = [0; 1024];
                     loop {
                         let msg = bus.recv().unwrap();
-                        let payload = bincode::serialize(&msg).unwrap();
+                        let payload = bincode::serialize(msg.as_ref()).unwrap();
                         stream.write_all(&payload).unwrap();
                         let size = stream.read(&mut buf).unwrap();
                         if size == 0 {
