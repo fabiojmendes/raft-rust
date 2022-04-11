@@ -208,13 +208,12 @@ fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
             match TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], peer))) {
                 Ok(mut stream) => {
                     println!("Connected {:?}", stream);
-                    let mut bus = {
+                    let bus = {
                         let mut state = state_mtx.lock().unwrap();
                         state.bus.add_rx()
                     };
                     let mut buf = [0; 1024];
-                    loop {
-                        let msg = bus.recv().unwrap();
+                    for msg in bus {
                         let payload = bincode::serialize(msg.as_ref()).unwrap();
                         stream.write_all(&payload).unwrap();
                         let size = stream.read(&mut buf).unwrap();
