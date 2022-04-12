@@ -14,9 +14,9 @@ const ELECTION_RND: u64 = 2000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
-    id: u16,
-    term: u64,
-    mtype: MessageType,
+    pub(crate) id: u16,
+    pub(crate) term: u64,
+    pub(crate) mtype: MessageType,
 }
 
 impl Message {

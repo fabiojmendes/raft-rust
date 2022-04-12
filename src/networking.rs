@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     io::{self, Read, Write},
-    net::{SocketAddr, TcpStream, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -53,11 +53,11 @@ pub fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
                 Ok(stream) => {
                     println!("Connected {:?}", stream);
                     if let Err(e) = start_reply_thread(&stream, state_mtx.clone()) {
-                        println!("Error on reading thread: {}", e);
+                        println!("Error creating reading thread for {peer}: {}", e);
                         break;
                     }
                     if let Err(e) = start_sender(stream, state_mtx.clone()) {
-                        println!("Error on writing thread: {}", e);
+                        println!("Error on writing thread for {peer}: {}", e);
                         break;
                     }
                 }
@@ -104,4 +104,72 @@ pub fn serve(listener: TcpListener, state_mtx: Arc<Mutex<State>>) -> io::Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        core::{Message, MessageType},
+        networking::BUFFER_SIZE,
+    };
+
+    #[test]
+    fn test_serialize_append_req() -> Result<(), bincode::Error> {
+        let msg = Message {
+            id: 0,
+            term: 0,
+            mtype: MessageType::AppendReq { msg_id: 1 },
+        };
+        let size = bincode::serialized_size(&msg)? as usize;
+        assert!(size < BUFFER_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_append_res() -> Result<(), bincode::Error> {
+        let msg = Message {
+            id: 0,
+            term: 0,
+            mtype: MessageType::AppendRes { msg_id: 1 },
+        };
+        let size = bincode::serialized_size(&msg)? as usize;
+        assert!(size < BUFFER_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_vote_req() -> Result<(), bincode::Error> {
+        let msg = Message {
+            id: 0,
+            term: 0,
+            mtype: MessageType::VoteReq,
+        };
+        let size = bincode::serialized_size(&msg)? as usize;
+        assert!(size < BUFFER_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_vote_res() -> Result<(), bincode::Error> {
+        let msg = Message {
+            id: 0,
+            term: 0,
+            mtype: MessageType::VoteRes,
+        };
+        let size = bincode::serialized_size(&msg)? as usize;
+        assert!(size < BUFFER_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_ack() -> Result<(), bincode::Error> {
+        let msg = Message {
+            id: 0,
+            term: 0,
+            mtype: MessageType::Ack,
+        };
+        let size = bincode::serialized_size(&msg)? as usize;
+        assert!(size < BUFFER_SIZE);
+        Ok(())
+    }
 }
