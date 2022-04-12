@@ -9,9 +9,8 @@ use std::{
 use crate::core::State;
 use bus::Bus;
 
-mod client;
 mod core;
-mod server;
+mod networking;
 
 const TICK_DELAY: u64 = 1000;
 
@@ -35,11 +34,11 @@ fn main() -> io::Result<()> {
     let state_mtx = Arc::new(Mutex::new(State::new(local_port, bus)));
 
     for p in peers {
-        client::connect(p, state_mtx.clone());
+        networking::connect(p, state_mtx.clone());
     }
 
     start_timer(state_mtx.clone());
 
-    server::serve(listener, state_mtx)?;
+    networking::serve(listener, state_mtx)?;
     Ok(())
 }
