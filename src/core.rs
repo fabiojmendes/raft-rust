@@ -14,12 +14,16 @@ const ELECTION_RND: u64 = 2000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
-    pub(crate) id: u16,
-    pub(crate) term: u64,
-    pub(crate) mtype: MessageType,
+    id: u16,
+    term: u64,
+    mtype: MessageType,
 }
 
 impl Message {
+    pub fn new(id: u16, term: u64, mtype: MessageType) -> Message {
+        Message { id, term, mtype }
+    }
+
     pub fn mtype(&self) -> &MessageType {
         &self.mtype
     }
@@ -29,7 +33,7 @@ impl Message {
 pub enum MessageType {
     AppendReq { msg_id: u64 },
     AppendRes { msg_id: u64 },
-    VoteReq,
+    VoteReq { msg_id: u64 },
     VoteRes,
     Ack,
 }
@@ -71,28 +75,32 @@ impl State {
     }
 
     pub fn vote(&mut self, msg: Message) -> Message {
-        let mtype = if msg.term > self.term && self.voted_on < msg.term {
-            println!("[{}] Voting on {:?}", self.id, msg);
-            self.term = msg.term;
-            self.voted_on = msg.term;
-            self.last_update = Instant::now();
-            MessageType::VoteRes
-        } else {
-            MessageType::Ack
+        let mtype = match msg {
+            Message {
+                term,
+                mtype: MessageType::VoteReq { msg_id },
+                ..
+            } if self.term < term && self.voted_on < term && self.msg_id <= msg_id => {
+                println!("[{}] Voting on {:?}", self.id, msg);
+                self.term = msg.term;
+                self.voted_on = msg.term;
+                self.last_update = Instant::now();
+                MessageType::VoteRes
+            }
+            _ => MessageType::Ack,
         };
-        Message {
-            id: self.id,
-            term: self.term,
-            mtype,
-        }
+
+        Message::new(self.id, self.term, mtype)
     }
 
     fn req_votes(&mut self) {
-        self.bus.broadcast(Arc::new(Message {
-            id: self.id,
-            term: self.term,
-            mtype: MessageType::VoteReq,
-        }));
+        self.bus.broadcast(Arc::new(Message::new(
+            self.id,
+            self.term,
+            MessageType::VoteReq {
+                msg_id: self.msg_id,
+            },
+        )));
     }
 
     pub fn receive_vote(&mut self) {
@@ -130,13 +138,13 @@ impl State {
                 self.last_update = Instant::now();
                 self.msg_id += 1;
 
-                self.bus.broadcast(Arc::new(Message {
-                    id: self.id,
-                    term: self.term,
-                    mtype: MessageType::AppendReq {
+                self.bus.broadcast(Arc::new(Message::new(
+                    self.id,
+                    self.term,
+                    MessageType::AppendReq {
                         msg_id: self.msg_id,
                     },
-                }));
+                )));
             }
         }
     }
@@ -155,11 +163,7 @@ impl State {
             MessageType::Ack
         };
 
-        Message {
-            id: self.id,
-            term: self.term,
-            mtype,
-        }
+        Message::new(self.id, self.term, mtype)
     }
 
     pub fn commit(&mut self, msg: Message) {
@@ -169,10 +173,6 @@ impl State {
     }
 
     pub fn ack(&self) -> Message {
-        Message {
-            id: self.id,
-            term: self.term,
-            mtype: MessageType::Ack,
-        }
+        Message::new(self.id, self.term, MessageType::Ack)
     }
 }

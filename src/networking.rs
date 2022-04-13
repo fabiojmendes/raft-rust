@@ -54,15 +54,13 @@ pub fn connect(peer: u16, state_mtx: Arc<Mutex<State>>) {
                     println!("Connected {:?}", stream);
                     if let Err(e) = start_reply_thread(&stream, state_mtx.clone()) {
                         println!("Error creating reading thread for {peer}: {}", e);
-                        break;
                     }
                     if let Err(e) = start_sender(stream, state_mtx.clone()) {
                         println!("Error on writing thread for {peer}: {}", e);
-                        break;
                     }
                 }
                 Err(e) => {
-                    println!("Error connecting: {}", e);
+                    println!("Error connecting to {peer}: {e} reconnect in {RECONNECT_DELAY}ms");
                     thread::sleep(Duration::from_millis(RECONNECT_DELAY));
                 }
             }
@@ -82,7 +80,7 @@ fn handle_conn(
             let mut state = state_mtx.lock().unwrap();
             match req.mtype() {
                 MessageType::AppendReq { .. } => state.append(req),
-                MessageType::VoteReq => state.vote(req),
+                MessageType::VoteReq { .. } => state.vote(req),
                 _ => state.ack(),
             }
         };
@@ -115,11 +113,7 @@ mod tests {
 
     #[test]
     fn test_serialize_append_req() -> Result<(), bincode::Error> {
-        let msg = Message {
-            id: 0,
-            term: 0,
-            mtype: MessageType::AppendReq { msg_id: 1 },
-        };
+        let msg = Message::new(0, 0, MessageType::AppendReq { msg_id: 1 });
         let size = bincode::serialized_size(&msg)? as usize;
         assert!(size < BUFFER_SIZE);
         Ok(())
@@ -127,11 +121,7 @@ mod tests {
 
     #[test]
     fn test_serialize_append_res() -> Result<(), bincode::Error> {
-        let msg = Message {
-            id: 0,
-            term: 0,
-            mtype: MessageType::AppendRes { msg_id: 1 },
-        };
+        let msg = Message::new(0, 0, MessageType::AppendRes { msg_id: 1 });
         let size = bincode::serialized_size(&msg)? as usize;
         assert!(size < BUFFER_SIZE);
         Ok(())
@@ -139,11 +129,7 @@ mod tests {
 
     #[test]
     fn test_serialize_vote_req() -> Result<(), bincode::Error> {
-        let msg = Message {
-            id: 0,
-            term: 0,
-            mtype: MessageType::VoteReq,
-        };
+        let msg = Message::new(0, 0, MessageType::VoteReq { msg_id: 1 });
         let size = bincode::serialized_size(&msg)? as usize;
         assert!(size < BUFFER_SIZE);
         Ok(())
@@ -151,11 +137,7 @@ mod tests {
 
     #[test]
     fn test_serialize_vote_res() -> Result<(), bincode::Error> {
-        let msg = Message {
-            id: 0,
-            term: 0,
-            mtype: MessageType::VoteRes,
-        };
+        let msg = Message::new(0, 0, MessageType::VoteRes);
         let size = bincode::serialized_size(&msg)? as usize;
         assert!(size < BUFFER_SIZE);
         Ok(())
@@ -163,11 +145,7 @@ mod tests {
 
     #[test]
     fn test_serialize_ack() -> Result<(), bincode::Error> {
-        let msg = Message {
-            id: 0,
-            term: 0,
-            mtype: MessageType::Ack,
-        };
+        let msg = Message::new(0, 0, MessageType::Ack);
         let size = bincode::serialized_size(&msg)? as usize;
         assert!(size < BUFFER_SIZE);
         Ok(())
